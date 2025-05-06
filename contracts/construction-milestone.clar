@@ -226,3 +226,107 @@
     (ok project-id)
   )
 )
+
+
+(define-constant DISPUTE-WINDOW-BLOCKS u144)
+(define-constant err-no-active-dispute (err u110))
+(define-constant err-dispute-window-expired (err u111))
+
+(define-map milestone-disputes
+  { milestone-id: uint }
+  {
+    disputer: principal,
+    reason: (string-ascii 200),
+    created-at: uint,
+    resolved: bool
+  }
+)
+
+(define-public (file-dispute (milestone-id uint) (reason (string-ascii 200)))
+  (let (
+    (milestone (unwrap! (get-milestone milestone-id) err-not-found))
+    (project (unwrap! (get-project (get project-id milestone)) err-not-found))
+  )
+    (asserts! (is-eq tx-sender (get contractor project)) err-unauthorized)
+    (asserts! (is-eq (get status milestone) "pending") err-milestone-not-active)
+    
+    (map-set milestone-disputes
+      { milestone-id: milestone-id }
+      {
+        disputer: tx-sender,
+        reason: reason,
+        created-at: stacks-block-height,
+        resolved: false
+      }
+    )
+    (ok milestone-id)
+  )
+)
+
+(define-public (resolve-dispute (milestone-id uint) (approve bool))
+  (let (
+    (dispute (unwrap! (map-get? milestone-disputes { milestone-id: milestone-id }) err-no-active-dispute))
+    (milestone (unwrap! (get-milestone milestone-id) err-not-found))
+    (project (unwrap! (get-project (get project-id milestone)) err-not-found))
+  )
+    (asserts! (is-eq tx-sender (get client project)) err-unauthorized)
+    (asserts! (not (get resolved dispute)) err-milestone-not-active)
+    (asserts! (<= stacks-block-height (+ (get created-at dispute) DISPUTE-WINDOW-BLOCKS)) err-dispute-window-expired)
+    
+    (map-set milestone-disputes
+      { milestone-id: milestone-id }
+      (merge dispute { resolved: true })
+    )
+    
+    (if approve
+      (map-set milestones
+        { milestone-id: milestone-id }
+        (merge milestone { status: "verified" })
+      )
+      true
+    )
+    (ok milestone-id)
+  )
+)
+
+(define-map project-progress
+  { project-id: uint }
+  {
+    completed-milestones: uint,
+    total-milestones: uint,
+    estimated-completion: uint,
+    last-updated: uint
+  }
+)
+
+(define-public (update-project-timeline (project-id uint) (new-estimate uint))
+  (let (
+    (project (unwrap! (get-project project-id) err-not-found))
+    (milestone-list (get-project-milestones project-id))
+    (completed-count (fold check-completed-milestones (get milestone-ids milestone-list) u0))
+  )
+    (asserts! (or (is-eq tx-sender (get contractor project))
+                  (is-eq tx-sender (get client project))) err-unauthorized)
+    (asserts! (is-eq (get status project) "active") err-project-not-active)
+    
+    (map-set project-progress
+      { project-id: project-id }
+      {
+        completed-milestones: completed-count,
+        total-milestones: (len (get milestone-ids milestone-list)),
+        estimated-completion: new-estimate,
+        last-updated: stacks-block-height
+      }
+    )
+    (ok project-id)
+  )
+)
+
+(define-private (check-completed-milestones (milestone-id uint) (count uint))
+  (let ((milestone (unwrap! (get-milestone milestone-id) count)))
+    (if (is-eq (get status milestone) "completed")
+      (+ count u1)
+      count
+    )
+  )
+)
