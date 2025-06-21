@@ -330,3 +330,151 @@
     )
   )
 )
+
+(define-map project-escrow
+  { project-id: uint }
+  { deposited-amount: uint }
+)
+
+(define-public (create-project-with-escrow (name (string-ascii 100)) (contractor principal) (total-budget uint))
+  (let
+    (
+      (project-id (var-get next-project-id))
+    )
+    (asserts! (> total-budget u0) err-invalid-amount)
+    (asserts! (>= (stx-get-balance tx-sender) total-budget) err-insufficient-funds)
+    
+    (try! (stx-transfer? total-budget tx-sender (as-contract tx-sender)))
+    
+    (map-set projects
+      { project-id: project-id }
+      {
+        name: name,
+        client: tx-sender,
+        contractor: contractor,
+        total-budget: total-budget,
+        remaining-budget: total-budget,
+        status: "active",
+        created-at: stacks-block-height,
+        completed-at: none
+      }
+    )
+    
+    (map-set project-escrow
+      { project-id: project-id }
+      { deposited-amount: total-budget }
+    )
+    
+    (map-set project-milestones
+      { project-id: project-id }
+      { milestone-ids: (list) }
+    )
+    
+    (var-set next-project-id (+ project-id u1))
+    (ok project-id)
+  )
+)
+
+(define-public (release-escrow-payment (milestone-id uint))
+  (let
+    (
+      (milestone (get-milestone milestone-id))
+      (project-id (get project-id (unwrap-panic milestone)))
+      (project (get-project project-id))
+      (amount (get amount (unwrap-panic milestone)))
+      (escrow (unwrap! (map-get? project-escrow { project-id: project-id }) err-not-found))
+    )
+    (asserts! (is-some milestone) err-not-found)
+    (asserts! (is-some project) err-not-found)
+    (asserts! (or (is-eq tx-sender (get client (unwrap-panic project)))
+                 (is-eq tx-sender contract-owner)) err-unauthorized)
+    (asserts! (is-eq (get status (unwrap-panic milestone)) "verified") err-milestone-not-active)
+    (asserts! (>= (get deposited-amount escrow) amount) err-insufficient-funds)
+    
+    (try! (as-contract (stx-transfer? amount tx-sender (get contractor (unwrap-panic project)))))
+    
+    (map-set milestones
+      { milestone-id: milestone-id }
+      (merge (unwrap-panic milestone) 
+        { 
+          status: "completed",
+          completed-at: (some stacks-block-height)
+        }
+      )
+    )
+    
+    (map-set projects
+      { project-id: project-id }
+      (merge (unwrap-panic project)
+        {
+          remaining-budget: (- (get remaining-budget (unwrap-panic project)) amount)
+        }
+      )
+    )
+    
+    (map-set project-escrow
+      { project-id: project-id }
+      { deposited-amount: (- (get deposited-amount escrow) amount) }
+    )
+    
+    (ok milestone-id)
+  )
+)
+
+(define-public (refund-remaining-escrow (project-id uint))
+  (let
+    (
+      (project (get-project project-id))
+      (escrow (unwrap! (map-get? project-escrow { project-id: project-id }) err-not-found))
+      (remaining-amount (get deposited-amount escrow))
+    )
+    (asserts! (is-some project) err-not-found)
+    (asserts! (is-eq tx-sender (get client (unwrap-panic project))) err-unauthorized)
+    (asserts! (is-eq (get status (unwrap-panic project)) "completed") err-project-not-active)
+    (asserts! (> remaining-amount u0) err-invalid-amount)
+    
+    (try! (as-contract (stx-transfer? remaining-amount tx-sender (get client (unwrap-panic project)))))
+    
+    (map-set project-escrow
+      { project-id: project-id }
+      { deposited-amount: u0 }
+    )
+    
+    (ok remaining-amount)
+  )
+)
+
+(define-read-only (get-escrow-balance (project-id uint))
+  (default-to { deposited-amount: u0 } (map-get? project-escrow { project-id: project-id }))
+)
+
+(define-public (emergency-escrow-withdrawal (project-id uint))
+  (let
+    (
+      (project (get-project project-id))
+      (escrow (unwrap! (map-get? project-escrow { project-id: project-id }) err-not-found))
+      (total-amount (get deposited-amount escrow))
+    )
+    (asserts! (is-some project) err-not-found)
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (> total-amount u0) err-invalid-amount)
+    
+    (try! (as-contract (stx-transfer? total-amount tx-sender (get client (unwrap-panic project)))))
+    
+    (map-set project-escrow
+      { project-id: project-id }
+      { deposited-amount: u0 }
+    )
+    
+    (map-set projects
+      { project-id: project-id }
+      (merge (unwrap-panic project)
+        {
+          status: "cancelled"
+        }
+      )
+    )
+    
+    (ok total-amount)
+  )
+)
