@@ -231,6 +231,8 @@
 (define-constant DISPUTE-WINDOW-BLOCKS u144)
 (define-constant err-no-active-dispute (err u110))
 (define-constant err-dispute-window-expired (err u111))
+(define-constant err-change-request-exists (err u112))
+(define-constant err-no-change-request (err u113))
 
 (define-map milestone-disputes
   { milestone-id: uint }
@@ -477,4 +479,96 @@
     
     (ok total-amount)
   )
+)
+
+(define-map milestone-change-requests
+  { milestone-id: uint }
+  {
+    new-description: (string-ascii 200),
+    new-amount: uint,
+    requestor: principal,
+    created-at: uint,
+    approved: bool,
+    processed: bool
+  }
+)
+
+(define-public (request-milestone-change (milestone-id uint) (new-description (string-ascii 200)) (new-amount uint))
+  (let (
+    (milestone (unwrap! (get-milestone milestone-id) err-not-found))
+    (project (unwrap! (get-project (get project-id milestone)) err-not-found))
+    (existing-request (map-get? milestone-change-requests { milestone-id: milestone-id }))
+  )
+    (asserts! (is-eq tx-sender (get contractor project)) err-unauthorized)
+    (asserts! (is-eq (get status milestone) "pending") err-milestone-not-active)
+    (asserts! (is-none existing-request) err-change-request-exists)
+    (asserts! (> new-amount u0) err-invalid-amount)
+    
+    (map-set milestone-change-requests
+      { milestone-id: milestone-id }
+      {
+        new-description: new-description,
+        new-amount: new-amount,
+        requestor: tx-sender,
+        created-at: stacks-block-height,
+        approved: false,
+        processed: false
+      }
+    )
+    (ok milestone-id)
+  )
+)
+
+(define-public (approve-milestone-change (milestone-id uint) (approve bool))
+  (let (
+    (change-request (unwrap! (map-get? milestone-change-requests { milestone-id: milestone-id }) err-no-change-request))
+    (milestone (unwrap! (get-milestone milestone-id) err-not-found))
+    (project (unwrap! (get-project (get project-id milestone)) err-not-found))
+    (current-amount (get amount milestone))
+    (new-amount (get new-amount change-request))
+    (amount-difference (if (> new-amount current-amount) (- new-amount current-amount) u0))
+  )
+    (asserts! (is-eq tx-sender (get client project)) err-unauthorized)
+    (asserts! (not (get processed change-request)) err-already-exists)
+    (asserts! (is-eq (get status milestone) "pending") err-milestone-not-active)
+    (asserts! (or (not approve) (<= amount-difference (get remaining-budget project))) err-insufficient-funds)
+    
+    (map-set milestone-change-requests
+      { milestone-id: milestone-id }
+      (merge change-request { approved: approve, processed: true })
+    )
+    
+    (if approve
+      (begin
+        (map-set milestones
+          { milestone-id: milestone-id }
+          (merge milestone {
+            description: (get new-description change-request),
+            amount: new-amount
+          })
+        )
+        (if (> new-amount current-amount)
+          (map-set projects
+            { project-id: (get project-id milestone) }
+            (merge project {
+              remaining-budget: (- (get remaining-budget project) amount-difference)
+            })
+          )
+          (map-set projects
+            { project-id: (get project-id milestone) }
+            (merge project {
+              remaining-budget: (+ (get remaining-budget project) (- current-amount new-amount))
+            })
+          )
+        )
+      )
+      true
+    )
+    
+    (ok milestone-id)
+  )
+)
+
+(define-read-only (get-milestone-change-request (milestone-id uint))
+  (map-get? milestone-change-requests { milestone-id: milestone-id })
 )
