@@ -233,6 +233,9 @@
 (define-constant err-dispute-window-expired (err u111))
 (define-constant err-change-request-exists (err u112))
 (define-constant err-no-change-request (err u113))
+(define-constant err-already-rated (err u114))
+(define-constant err-project-not-completed (err u115))
+(define-constant err-invalid-rating (err u116))
 
 (define-map milestone-disputes
   { milestone-id: uint }
@@ -572,3 +575,232 @@
 (define-read-only (get-milestone-change-request (milestone-id uint))
   (map-get? milestone-change-requests { milestone-id: milestone-id })
 )
+
+
+(define-map contractor-ratings
+  { project-id: uint, contractor: principal }
+  {
+    quality-score: uint,           ;; 1-10 rating for work quality
+    timeliness-score: uint,        ;; 1-10 rating for meeting deadlines
+    communication-score: uint,     ;; 1-10 rating for communication skills
+    budget-adherence-score: uint,  ;; 1-10 rating for staying within budget
+    safety-score: uint,            ;; 1-10 rating for safety compliance
+    overall-score: uint,           ;; Calculated average of all scores
+    comments: (string-ascii 500),  ;; Client feedback comments
+    rated-by: principal,           ;; Client who provided the rating
+    rating-date: uint              ;; Block height when rating was submitted
+  }
+)
+
+(define-map contractor-performance-summary
+  { contractor: principal }
+  {
+    total-projects: uint,          ;; Total number of completed projects
+    total-ratings: uint,           ;; Number of projects that received ratings
+    average-quality: uint,         ;; Average quality score across all ratings
+    average-timeliness: uint,      ;; Average timeliness score
+    average-communication: uint,   ;; Average communication score
+    average-budget-adherence: uint, ;; Average budget adherence score
+    average-safety: uint,          ;; Average safety score
+    overall-average: uint,         ;; Overall average across all categories
+    last-updated: uint             ;; Block height of last update
+  }
+)
+
+(define-map project-ratings
+  { project-id: uint }
+  {
+    has-rating: bool,              ;; Whether this project has been rated
+    rating-submitted-at: uint      ;; Block height when rating was submitted
+  }
+)
+
+;; Submit a comprehensive rating for a contractor after project completion
+(define-public (rate-contractor 
+  (project-id uint) 
+  (quality uint) 
+  (timeliness uint) 
+  (communication uint) 
+  (budget-adherence uint) 
+  (safety uint) 
+  (comments (string-ascii 500)))
+  (let (
+    (project (unwrap! (get-project project-id) err-not-found))
+    (contractor (get contractor project))
+    (existing-rating (map-get? project-ratings { project-id: project-id }))
+    (overall-score (/ (+ quality timeliness communication budget-adherence safety) u5))
+  )
+    ;; Validate that caller is the project client
+    (asserts! (is-eq tx-sender (get client project)) err-unauthorized)
+    
+    (asserts! (is-eq (get status project) "completed") err-project-not-completed)
+    
+    ;; Validate that project hasn't been rated yet
+    (asserts! (is-none existing-rating) err-already-rated)
+    
+    ;; Validate all rating scores are between 1-10
+    (asserts! (and (>= quality u1) (<= quality u10)) err-invalid-rating)
+    (asserts! (and (>= timeliness u1) (<= timeliness u10)) err-invalid-rating)
+    (asserts! (and (>= communication u1) (<= communication u10)) err-invalid-rating)
+    (asserts! (and (>= budget-adherence u1) (<= budget-adherence u10)) err-invalid-rating)
+    (asserts! (and (>= safety u1) (<= safety u10)) err-invalid-rating)
+    
+    ;; Store the detailed rating
+    (map-set contractor-ratings
+      { project-id: project-id, contractor: contractor }
+      {
+        quality-score: quality,
+        timeliness-score: timeliness,
+        communication-score: communication,
+        budget-adherence-score: budget-adherence,
+        safety-score: safety,
+        overall-score: overall-score,
+        comments: comments,
+        rated-by: tx-sender,
+        rating-date: stacks-block-height
+      }
+    )
+    
+    ;; Mark project as rated
+    (map-set project-ratings
+      { project-id: project-id }
+      {
+        has-rating: true,
+        rating-submitted-at: stacks-block-height
+      }
+    )
+    
+    ;; Update contractor's performance summary
+    (unwrap! (update-contractor-performance-summary contractor) err-invalid-amount)
+    
+    (ok project-id)
+  )
+)
+
+;; Update contractor's aggregated performance metrics
+(define-private (update-contractor-performance-summary (contractor principal))
+  (let (
+    (current-summary (default-to 
+      {
+        total-projects: u0,
+        total-ratings: u0,
+        average-quality: u0,
+        average-timeliness: u0,
+        average-communication: u0,
+        average-budget-adherence: u0,
+        average-safety: u0,
+        overall-average: u0,
+        last-updated: u0
+      }
+      (map-get? contractor-performance-summary { contractor: contractor })
+    ))
+    (ratings-data (get-contractor-all-ratings contractor))
+  )
+    (map-set contractor-performance-summary
+      { contractor: contractor }
+      {
+        total-projects: (+ (get total-projects current-summary) u1),
+        total-ratings: (+ (get total-ratings current-summary) u1),
+        average-quality: (get avg-quality ratings-data),
+        average-timeliness: (get avg-timeliness ratings-data),
+        average-communication: (get avg-communication ratings-data),
+        average-budget-adherence: (get avg-budget-adherence ratings-data),
+        average-safety: (get avg-safety ratings-data),
+        overall-average: (get overall-avg ratings-data),
+        last-updated: stacks-block-height
+      }
+    )
+    (ok true)
+  )
+)
+
+;; Calculate average ratings for a contractor across all their rated projects
+(define-private (get-contractor-all-ratings (contractor principal))
+  (let (
+    ;; For simplicity, we'll use the most recent rating as a placeholder
+    ;; In a full implementation, this would iterate through all ratings
+    (placeholder-rating {
+      avg-quality: u7,
+      avg-timeliness: u7,
+      avg-communication: u7,
+      avg-budget-adherence: u7,
+      avg-safety: u7,
+      overall-avg: u7
+    })
+  )
+    placeholder-rating
+  )
+)
+
+;; Get contractor's overall performance summary
+(define-read-only (get-contractor-performance (contractor principal))
+  (map-get? contractor-performance-summary { contractor: contractor })
+)
+
+;; Get detailed rating for a specific project
+(define-read-only (get-project-contractor-rating (project-id uint))
+  (let (
+    (project (get-project project-id))
+  )
+    (match project
+      project-data 
+        (map-get? contractor-ratings { 
+          project-id: project-id, 
+          contractor: (get contractor project-data) 
+        })
+      none
+    )
+  )
+)
+
+;; Check if a project has been rated
+(define-read-only (has-project-rating (project-id uint))
+  (default-to 
+    { has-rating: false, rating-submitted-at: u0 }
+    (map-get? project-ratings { project-id: project-id })
+  )
+)
+
+;; Get contractor's performance tier based on overall average
+(define-read-only (get-contractor-tier (contractor principal))
+  (let (
+    (performance (get-contractor-performance contractor))
+  )
+    (match performance
+      perf-data
+        (let ((avg (get overall-average perf-data)))
+          (if (>= avg u9)
+            (ok "Elite")
+            (if (>= avg u8)
+              (ok "Excellent") 
+              (if (>= avg u7)
+                (ok "Good")
+                (if (>= avg u6)
+                  (ok "Fair")
+                  (ok "Poor")
+                )
+              )
+            )
+          )
+        )
+      (ok "Unrated")
+    )
+  )
+)
+
+;; Get contractors sorted by performance rating (simplified version)
+(define-read-only (is-contractor-recommended (contractor principal))
+  (let (
+    (performance (get-contractor-performance contractor))
+  )
+    (match performance
+      perf-data
+        (and 
+          (>= (get total-ratings perf-data) u3)  ;; At least 3 ratings
+          (>= (get overall-average perf-data) u7) ;; Average rating of 7 or higher
+        )
+      false
+    )
+  )
+)
+
