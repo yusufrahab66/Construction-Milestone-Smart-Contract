@@ -9,6 +9,11 @@ requirements = []
 path = 'contracts/construction-milestone.clar'
 clarity_version = 3
 epoch = 3.1
+
+[contracts.resource-tracker]
+path = 'contracts/resource-tracker.clar'
+clarity_version = 3
+epoch = 3.1
 [repl.analysis]
 passes = ['check_checker']
 
